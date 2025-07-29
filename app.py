@@ -23,9 +23,9 @@ activate, the dashboard highlights the increased probability of a
 cycle peak.
 
 This code is intended to run in a cloud environment. Ensure that
-`streamlit run app.py` is executed from the project root. To avoid
-exposing your Glassnode API key, supply it via an environment
-variable called `GLASSNODE_API_KEY` or enter it in the sidebar input.
+`streamlit run app.py` is executed from the project root. No API key
+is required for on‑chain metrics because they come from the free
+BGeometrics API. Other data are pulled from public sources.
 """
 
 import os
@@ -99,6 +99,7 @@ def _bgeometrics_get(endpoint: str, value_field: str, days: int = None) -> Optio
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_mvrv_zscore(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
     Fetch MVRV Z‑Score from the BGeometrics API.
@@ -113,6 +114,7 @@ def fetch_mvrv_zscore(api_key: str = "", days: int = 730) -> Optional[pd.DataFra
     return _bgeometrics_get("mvrv-zscore", "mvrvZscore", days=days)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_lth_sopr(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
     Fetch Long Term Holder SOPR (spent output profit ratio) from the BGeometrics API.
@@ -124,6 +126,7 @@ def fetch_lth_sopr(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]
     return _bgeometrics_get("lth-sopr", "lthSopr", days=days)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_reserve_risk(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
     Fetch Reserve Risk from the BGeometrics API【474942229923549†L90-L92】.
@@ -135,6 +138,7 @@ def fetch_reserve_risk(api_key: str = "", days: int = 730) -> Optional[pd.DataFr
     return _bgeometrics_get("reserve-risk", "reserveRisk", days=days)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_exchange_inflows(api_key: str = "", days: int = 30) -> Optional[pd.DataFrame]:
     """
     Fetch proxy for exchange inflows using ETF BTC flow from the BGeometrics API.
