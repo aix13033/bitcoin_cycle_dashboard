@@ -153,7 +153,8 @@ def _bgeometrics_get(endpoint: str, value_field: str, days: int = None) -> Optio
         return None
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# Cache for a full day to stay well within the free BGeometrics rate limit
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_mvrv_zscore(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
     Fetch MVRV Z‑Score from the BGeometrics API.
@@ -168,7 +169,8 @@ def fetch_mvrv_zscore(api_key: str = "", days: int = 730) -> Optional[pd.DataFra
     return _bgeometrics_get("mvrv-zscore", "mvrvZscore", days=days)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# Cache for a full day to stay well within the free BGeometrics rate limit
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_lth_sopr(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
     Fetch Long Term Holder SOPR (spent output profit ratio) from the BGeometrics API.
@@ -180,7 +182,8 @@ def fetch_lth_sopr(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]
     return _bgeometrics_get("lth-sopr", "lthSopr", days=days)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# Cache for a full day to stay well within the free BGeometrics rate limit
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_reserve_risk(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
     Fetch Reserve Risk from the BGeometrics API【474942229923549†L90-L92】.
@@ -192,7 +195,8 @@ def fetch_reserve_risk(api_key: str = "", days: int = 730) -> Optional[pd.DataFr
     return _bgeometrics_get("reserve-risk", "reserveRisk", days=days)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# Cache for a full day to stay well within the free BGeometrics rate limit
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_exchange_inflows(api_key: str = "", days: int = 30) -> Optional[pd.DataFrame]:
     """
     Fetch proxy for exchange inflows using ETF BTC flow from the BGeometrics API.
@@ -540,12 +544,21 @@ def main():
         # Sum the last 30 days of ETF flows in BTC
         monthly_inflow_btc = inflow_df['value'].tail(30).sum()
         if price_df is not None and not price_df.empty:
-            # Resample price to daily and forward fill, convert to DataFrame with a proper column name
-            price_daily = price_df['price'].resample('1D').last().ffill().to_frame(name='price')
-            # Join on index
+            # Resample price to daily and forward fill. Convert the resulting
+            # Series into a DataFrame so it retains a column name when joined.
+            price_daily = (
+                price_df['price']
+                .resample('1D')
+                .last()
+                .ffill()
+                .to_frame(name='price')
+            )
+            # Join the inflow series with the daily price on the date index
             combined = inflow_df.join(price_daily, how='inner')
-            # Multiply only if both columns exist
-            if 'value' in combined.columns and 'price' in combined.columns:
+            # Only perform multiplication if both required columns are present.
+            # Without this guard, combined['price'] may not exist and raise a
+            # KeyError/ValueError.
+            if {'value', 'price'}.issubset(combined.columns):
                 combined['usd'] = combined['value'] * combined['price']
                 monthly_inflow_usd = combined['usd'].tail(30).sum()
 
@@ -725,7 +738,10 @@ def main():
         for col in df.columns:
             if col.lower() in ["name", "indicname", "indicator", "indicname"]:
                 name_col = col
-            if col.lower() in ["hit", "triggered", "isHit"]:
+            # Some API responses use a camelCase 'isHit' field, which becomes
+            # 'ishit' when lowered. Include that variant in our match list so
+            # we pick up the correct column regardless of case.
+            if col.lower() in ["hit", "triggered", "ishit"]:
                 hit_col = col
         if name_col is None:
             name_col = df.columns[0]
