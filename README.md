@@ -84,6 +84,13 @@ If you need to change these values, edit the corresponding variables
 high confidence signals and show escalation levels without requiring
 any runtime configuration.
 
+The interface groups related metrics into categories (on‑chain, technical/exchange,
+macro) and uses tabs to organise charts, signals, a comparison table and
+guidance.  The comparison tab summarises how your framework’s thresholds differ
+from CoinGlass thresholds and displays the current values of each indicator.
+The guidance tab consolidates escalation levels and provides critical success
+factors and multi‑domain insights.
+
 ## Notes
 
 * BGeometrics’ free API is rate‑limited.  If on‑chain data fails to

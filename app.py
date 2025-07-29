@@ -604,12 +604,18 @@ def main() -> None:
         signals.append("Reserve Risk > 0.015")
     high_confidence = len(signals) >= 3
 
-    # Layout: metrics row
-    cols = st.columns(5)
-    # MVRV Z‑Score: caution at >5, high risk at >6 (extreme)
-    display_metric_card(cols[0], "MVRV Z‑Score", latest_mvrv, warning_threshold=6.0, caution_threshold=5.0, unit="", higher_is_warning=True)
-    # LTH‑SOPR: caution at >5, high risk at >8
-    display_metric_card(cols[1], "LTH‑SOPR", latest_lth, warning_threshold=8.0, caution_threshold=5.0, unit="", higher_is_warning=True)
+    # ---------------------------------------------------------------------
+    # Grouped metric display for a more modern and organised layout
+    # On‑chain metrics row: MVRV, LTH‑SOPR, Reserve Risk
+    st.subheader("On‑chain Metrics")
+    oc_cols = st.columns(3)
+    display_metric_card(oc_cols[0], "MVRV Z‑Score", latest_mvrv, warning_threshold=6.0, caution_threshold=5.0, unit="", higher_is_warning=True)
+    display_metric_card(oc_cols[1], "LTH‑SOPR", latest_lth, warning_threshold=8.0, caution_threshold=5.0, unit="", higher_is_warning=True)
+    display_metric_card(oc_cols[2], "Reserve Risk", latest_reserve, warning_threshold=0.015, caution_threshold=0.01, unit="", higher_is_warning=True)
+
+    # Technical & Exchange Metrics row: Pi Cycle, Exchange Inflow, BTC dominance, Funding rate
+    st.subheader("Technical & Exchange Metrics")
+    te_cols = st.columns(4)
     # Pi Cycle status: represent the ratio of difference to 2×350SMA.  Positive implies cross occurred, negative implies not yet.
     pi_status_val = None
     if price_df is not None and ma_df is not None and not ma_df.empty:
@@ -617,9 +623,8 @@ def main() -> None:
         last_111 = ma_df['111sma'].iloc[-1]
         if last_2x != 0:
             pi_status_val = (last_111 - last_2x) / abs(last_2x)
-    # caution when approaching cross (within -2% to 0), high risk when cross occurs (>=0)
     display_metric_card(
-        cols[2],
+        te_cols[0],
         "Pi Cycle Status",
         pi_status_val,
         warning_threshold=0.0,
@@ -627,9 +632,8 @@ def main() -> None:
         unit="",
         higher_is_warning=True,
     )
-    # Exchange inflow: thresholds determined above
     display_metric_card(
-        cols[3],
+        te_cols[1],
         "Exchange inflow (30d)",
         latest_inflow,
         warning_threshold=inflow_warning,
@@ -637,19 +641,16 @@ def main() -> None:
         unit=inflow_unit,
         higher_is_warning=True,
     )
-    # Reserve Risk: caution at >0.01, high risk at >0.015
-    display_metric_card(cols[4], "Reserve Risk", latest_reserve, warning_threshold=0.015, caution_threshold=0.01, unit="", higher_is_warning=True)
-
-    # Additional metrics row
-    cols2 = st.columns(4)
     # BTC dominance: caution if >60%, high risk if >65%
-    display_metric_card(cols2[0], "BTC dominance", btc_dom, warning_threshold=65.0, caution_threshold=60.0, unit="%", higher_is_warning=True)
+    display_metric_card(te_cols[2], "BTC dominance", btc_dom, warning_threshold=65.0, caution_threshold=60.0, unit="%", higher_is_warning=True)
     # Funding rate: caution at >0.05%, high risk at >0.1%
-    display_metric_card(cols2[1], "Funding rate", funding_rate, warning_threshold=0.1, caution_threshold=0.05, unit="", higher_is_warning=True)
-    # DeFi TVL growth: caution at >20%, high risk at >25%
-    display_metric_card(cols2[2], f"DeFi TVL {chain} growth {int(lookback_days)}d", defi_growth, warning_threshold=0.25, caution_threshold=0.20, unit="", higher_is_warning=True)
-    # 10Y Treasury yield: caution at >4.0%, high risk at >4.5%
-    display_metric_card(cols2[3], "10Y Treasury yield", treasury_yield, warning_threshold=4.5, caution_threshold=4.0, unit="%", higher_is_warning=True)
+    display_metric_card(te_cols[3], "Funding rate", funding_rate, warning_threshold=0.1, caution_threshold=0.05, unit="", higher_is_warning=True)
+
+    # Macro metrics row: DeFi TVL growth and 10Y Treasury yield
+    st.subheader("Macro Metrics")
+    mm_cols = st.columns(2)
+    display_metric_card(mm_cols[0], f"DeFi TVL {chain} growth {int(lookback_days)}d", defi_growth, warning_threshold=0.25, caution_threshold=0.20, unit="", higher_is_warning=True)
+    display_metric_card(mm_cols[1], "10Y Treasury yield", treasury_yield, warning_threshold=4.5, caution_threshold=4.0, unit="%", higher_is_warning=True)
 
     # High confidence signal display
     if high_confidence:
@@ -657,172 +658,222 @@ def main() -> None:
     else:
         st.info(f"Signals aligning: {len(signals)}/5 → {', '.join(signals) if signals else 'None'}")
 
-    # Escalation levels based on approximate price and metrics
-    current_price = None
-    if price_df is not None and not price_df.empty:
-        current_price = float(price_df['price'].iloc[-1])
-    st.markdown("---")
-    st.subheader("Escalation Levels")
-    level: Optional[int] = None
-    if current_price is not None:
-        # Level 4: price >135k and cross and MVRV >7 and funding rate >1%
-        cond4 = (
-            current_price > 135_000 and
-            latest_mvrv is not None and latest_mvrv > 7.0 and
-            pi_cross_occurred and
-            funding_rate is not None and funding_rate > 1.0
-        )
-        # Level 3: price >130k and MVRV >6 and btc dom <60 and funding rate >0.1 and at least two signals
-        cond3 = (
-            current_price > 130_000 and
-            latest_mvrv is not None and latest_mvrv > 6.0 and
-            btc_dom is not None and btc_dom < 60.0 and
-            funding_rate is not None and funding_rate > 0.1 and
-            len(signals) >= 2
-        )
-        # Level 2: price >120k and MVRV >5 and BTC dom declining (proxy: btc_dom < 65) and funding rate >0.01
-        cond2 = (
-            current_price > 120_000 and
-            latest_mvrv is not None and latest_mvrv > 5.0 and
-            btc_dom is not None and btc_dom < 65.0 and
-            funding_rate is not None and funding_rate > 0.01
-        )
-        # Level 1: price >110k and BTC dom >65 and funding >0.05 and defi growth >25% and treasury yield >4.5
-        cond1 = (
-            current_price > 110_000 and
-            btc_dom is not None and btc_dom > 65.0 and
-            funding_rate is not None and funding_rate > 0.05 and
-            defi_growth is not None and defi_growth > 0.25 and
-            treasury_yield is not None and treasury_yield > 4.5
-        )
-        if cond4:
-            level = 4
-        elif cond3:
-            level = 3
-        elif cond2:
-            level = 2
-        elif cond1:
-            level = 1
-
-    level_descriptions: dict[int, str] = {
-        1: (
-            "**Level 1 – Early Warning ($110K–$120K)**\n\n"
-            "• BTC dominance peaks >65%\n\n"
-            "• Funding rates >0.05%\n\n"
-            "• DeFi TVL growth >25% monthly\n\n"
-            "• 10Y Treasury yield approaching 4.5%\n"
-        ),
-        2: (
-            "**Level 2 – Caution Zone ($120K–$130K)**\n\n"
-            "• MVRV Z‑Score >5.0\n\n"
-            "• BTC dominance declining from peak\n\n"
-            "• Hash rate plateau signals\n\n"
-            "• Put/call ratios <0.5\n"
-        ),
-        3: (
-            "**Level 3 – High Risk ($130K–$135K)**\n\n"
-            "• MVRV Z‑Score >6.0\n\n"
-            "• BTC dominance <60%\n\n"
-            "• Funding rates >0.1%\n\n"
-            "• Multiple indicators firing\n"
-        ),
-        4: (
-            "**Level 4 – Extreme Danger (>$135K)**\n\n"
-            "• Price >$135K and Pi Cycle cross\n\n"
-            "• MVRV Z‑Score >7.0\n\n"
-            "• Funding rates >1%\n\n"
-            "• Escalated sell‑off risk\n"
-        ),
+    # Build comparison DataFrame to compare thresholds between CoinGlass and this framework.
+    # Some metrics (Puell Multiple, Fear & Greed) are not computed in this app and are marked as N/A.
+    pi_status_text = "Crossed" if pi_cross_occurred else ("Approaching" if pi_approaching else "Not triggered")
+    comparison_data = {
+        "Indicator": [
+            "MVRV Z‑Score",
+            "Pi Cycle Top",
+            "Puell Multiple",
+            "Bitcoin Dominance",
+            "Funding Rate",
+            "10Y Treasury",
+            "Fear & Greed",
+        ],
+        "CoinGlass Threshold": [
+            "≥3.0",
+            "Cross signal",
+            "Not specified",
+            "Basic tracking",
+            "Basic monitoring",
+            "Not included",
+            "Not specified",
+        ],
+        "My Framework": [
+            ">7.0 extreme",
+            "Cross + volume confirm",
+            ">4.0",
+            ">65% peak,<60% danger",
+            ">1.0% extreme",
+            ">4.5% warning",
+            ">90 extreme",
+        ],
+        "Current Status": [
+            f"{latest_mvrv:.2f}" if latest_mvrv is not None else "N/A",
+            pi_status_text,
+            "N/A",  # Puell Multiple not computed
+            f"{btc_dom:.2f}%" if btc_dom is not None else "N/A",
+            f"{(funding_rate * 100):.4f}%" if funding_rate is not None else "N/A",
+            f"{treasury_yield:.2f}%" if treasury_yield is not None else "N/A",
+            "N/A",  # Fear & Greed index not available
+        ],
     }
-    if level is not None:
-        st.warning(level_descriptions.get(level, ""), icon="⚠️")
-    else:
-        st.info("No escalation level triggered.")
+    comparison_df = pd.DataFrame(comparison_data)
 
-    # Plotting MVRV, LTH SOPR and Reserve Risk
-    st.markdown("---")
-    st.subheader("On‑chain Metrics Over Time")
-    chart_df = pd.DataFrame()
-    if mvrv_df is not None and 'value' in mvrv_df.columns:
-        chart_df['MVRV Z'] = mvrv_df['value']
-    if lth_df is not None and 'value' in lth_df.columns:
-        chart_df['LTH SOPR'] = lth_df['value']
-    if reserve_df is not None and 'value' in reserve_df.columns:
-        chart_df['Reserve Risk'] = reserve_df['value']
-    if not chart_df.empty:
-        fig = px.line(chart_df, x=chart_df.index, y=chart_df.columns, labels={"value": "Value", "index": "Date"}, title="On‑chain Indicators")
-        fig.update_layout(legend_title_text='Metric', height=400)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("On‑chain data not available. This may occur due to API rate limits or format changes.")
+    # Tabs for charts, signals, comparison and guidance
+    tab_charts, tab_signals, tab_compare, tab_guidance = st.tabs([
+        "Charts",
+        "Signals",
+        "Comparison",
+        "Guidance",
+    ])
 
-    # Plot Pi cycle moving averages if available
-    if price_df is not None and ma_df is not None and not ma_df.dropna().empty:
-        st.subheader("Pi Cycle Moving Averages")
-        plot_df = ma_df.dropna()
-        fig2 = px.line(plot_df, x=plot_df.index, y=['111sma', '2x350sma'], labels={"value": "Price", "index": "Date"}, title="111‑day SMA vs 2×350‑day SMA")
-        fig2.update_layout(legend_title_text='MA', height=400)
-        st.plotly_chart(fig2, use_container_width=True)
+    # Charts tab
+    with tab_charts:
+        # Plotting MVRV, LTH SOPR and Reserve Risk
+        chart_df = pd.DataFrame()
+        if mvrv_df is not None and 'value' in mvrv_df.columns:
+            chart_df['MVRV Z'] = mvrv_df['value']
+        if lth_df is not None and 'value' in lth_df.columns:
+            chart_df['LTH SOPR'] = lth_df['value']
+        if reserve_df is not None and 'value' in reserve_df.columns:
+            chart_df['Reserve Risk'] = reserve_df['value']
+        if not chart_df.empty:
+            fig = px.line(chart_df, x=chart_df.index, y=chart_df.columns, labels={"value": "Value", "index": "Date"}, title="On‑chain Indicators")
+            fig.update_layout(legend_title_text='Metric', height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("On‑chain data not available. This may occur due to API rate limits or format changes.")
+        # Plot Pi cycle moving averages if available
+        if price_df is not None and ma_df is not None and not ma_df.dropna().empty:
+            plot_df = ma_df.dropna()
+            fig2 = px.line(plot_df, x=plot_df.index, y=['111sma', '2x350sma'], labels={"value": "Price", "index": "Date"}, title="111‑day SMA vs 2×350‑day SMA")
+            fig2.update_layout(legend_title_text='MA', height=400)
+            st.plotly_chart(fig2, use_container_width=True)
 
-    # Display Coinglass Bull Market Peak Signals if available
-    if coinglass_df is not None and not coinglass_df.empty:
-        st.markdown("---")
-        st.subheader("Coinglass Bull Market Peak Signals")
-        df = coinglass_df.copy()
-        # Determine column names for indicator name and hit flags (case‑insensitive search)
-        name_col = None
-        hit_col = None
-        for col_name in df.columns:
-            lower = col_name.lower()
-            if lower in {"name", "indicname", "indicator"}:
-                name_col = col_name
-            if lower in {"hit", "triggered", "ishit"}:
-                hit_col = col_name
-        if name_col is None:
-            name_col = df.columns[0]
-        if hit_col is None and 'hit' in df.columns:
-            hit_col = 'hit'
-        # Count triggered signals
-        triggered = None
-        if hit_col is not None:
-            # Convert to boolean if values are strings
-            triggered = df[hit_col].astype(str).str.lower().isin(["true", "1", "yes"]).sum()
-            st.write(f"Indicators triggered: {triggered}/{len(df)}")
-        # Filter to display only critical indicators relevant for early top predictions.
-        # We keep rows whose name contains any of the specified keywords.  The list
-        # can be customised to include additional metrics as needed.
-        keywords = [
-            "mvrv",       # MVRV Z‑Score
-            "pi",         # Pi Cycle Top
-            "puell",      # Puell Multiple
-            "rsi",        # Long‑term RSI
-            "sopr",       # LTH SOPR / SOPR
-            "inflow",     # Exchange inflows / whale inflows
-            "funding",    # Funding rates (extreme or elevated)
-            "hash",       # Mining related (hash rate/ribbons)
-            "tvl",        # DeFi TVL (if provided by Coinglass)
-        ]
-        try:
-            mask = df[name_col].astype(str).str.lower().apply(
-                lambda x: any(kw in x for kw in keywords)
+    # Signals tab (Coinglass indicators)
+    with tab_signals:
+        if coinglass_df is not None and not coinglass_df.empty:
+            df = coinglass_df.copy()
+            # Determine column names for indicator name and hit flags (case‑insensitive search)
+            name_col = None
+            hit_col = None
+            for col_name in df.columns:
+                lower = col_name.lower()
+                if lower in {"name", "indicname", "indicator"}:
+                    name_col = col_name
+                if lower in {"hit", "triggered", "ishit"}:
+                    hit_col = col_name
+            if name_col is None:
+                name_col = df.columns[0]
+            if hit_col is None and 'hit' in df.columns:
+                hit_col = 'hit'
+            # Count triggered signals
+            if hit_col is not None:
+                # Convert to boolean if values are strings
+                triggered = df[hit_col].astype(str).str.lower().isin(["true", "1", "yes"]).sum()
+                st.write(f"Indicators triggered: {triggered}/{len(df)}")
+            # Filter to display only critical indicators relevant for early top predictions.
+            keywords = [
+                "mvrv",
+                "pi",
+                "puell",
+                "rsi",
+                "sopr",
+                "inflow",
+                "funding",
+                "hash",
+                "tvl",
+            ]
+            try:
+                mask = df[name_col].astype(str).str.lower().apply(
+                    lambda x: any(kw in x for kw in keywords)
+                )
+                filtered_df = df[mask].reset_index(drop=True)
+            except Exception:
+                filtered_df = df
+            st.dataframe(filtered_df)
+        else:
+            st.info("Coinglass data not available.")
+
+    # Comparison tab
+    with tab_compare:
+        st.subheader("Threshold Comparison Table")
+        st.table(comparison_df)
+
+    # Guidance tab: escalation levels and critical success factors
+    with tab_guidance:
+        st.subheader("Escalation Levels")
+        # Compute escalation level again (copy the logic)
+        current_price_local = None
+        if price_df is not None and not price_df.empty:
+            current_price_local = float(price_df['price'].iloc[-1])
+        local_level: Optional[int] = None
+        if current_price_local is not None:
+            cond4 = (
+                current_price_local > 135_000 and
+                latest_mvrv is not None and latest_mvrv > 7.0 and
+                pi_cross_occurred and
+                funding_rate is not None and funding_rate > 1.0
             )
-            filtered_df = df[mask].reset_index(drop=True)
-        except Exception:
-            filtered_df = df
-        st.dataframe(filtered_df)
-
-    # Show raw signals for reference
-    st.markdown("---")
-    st.subheader("Critical Success Factors")
-    st.markdown(
-        """
-        * **Never rely on a single indicator:** require at least three signals (MVRV Z, LTH‑SOPR, Pi Cycle, exchange inflows, reserve risk) for high confidence.
-        * **Monitor daily:** track MVRV progression, exchange flows and funding rates each day to catch rapid changes.
-        * **Historical timing:** prior cycle tops have occurred ~1,060 days from the cycle low, suggesting the next major top could emerge around **September 2025** (although the ETF era may alter patterns).
-        * **Risk management:** reduce positions as the escalation levels increase; levels 3 and 4 warrant aggressive de‑risking.
-        * **Market evolution:** recognise that ETF inflows and changing macro conditions can shift the behaviour of these metrics.
-        """
-    )
+            cond3 = (
+                current_price_local > 130_000 and
+                latest_mvrv is not None and latest_mvrv > 6.0 and
+                btc_dom is not None and btc_dom < 60.0 and
+                funding_rate is not None and funding_rate > 0.1 and
+                len(signals) >= 2
+            )
+            cond2 = (
+                current_price_local > 120_000 and
+                latest_mvrv is not None and latest_mvrv > 5.0 and
+                btc_dom is not None and btc_dom < 65.0 and
+                funding_rate is not None and funding_rate > 0.01
+            )
+            cond1 = (
+                current_price_local > 110_000 and
+                btc_dom is not None and btc_dom > 65.0 and
+                funding_rate is not None and funding_rate > 0.05 and
+                defi_growth is not None and defi_growth > 0.25 and
+                treasury_yield is not None and treasury_yield > 4.5
+            )
+            if cond4:
+                local_level = 4
+            elif cond3:
+                local_level = 3
+            elif cond2:
+                local_level = 2
+            elif cond1:
+                local_level = 1
+        level_desc = {
+            1: (
+                "**Level 1 – Early Warning ($110K–$120K)**\n\n"
+                "• BTC dominance peaks >65%\n\n"
+                "• Funding rates >0.05%\n\n"
+                "• DeFi TVL growth >25% monthly\n\n"
+                "• 10Y Treasury yield approaching 4.5%\n"
+            ),
+            2: (
+                "**Level 2 – Caution Zone ($120K–$130K)**\n\n"
+                "• MVRV Z‑Score >5.0\n\n"
+                "• BTC dominance declining from peak\n\n"
+                "• Hash rate plateau signals\n\n"
+                "• Put/call ratios <0.5\n"
+            ),
+            3: (
+                "**Level 3 – High Risk ($130K–$135K)**\n\n"
+                "• MVRV Z‑Score >6.0\n\n"
+                "• BTC dominance <60%\n\n"
+                "• Funding rates >0.1%\n\n"
+                "• Multiple indicators firing\n"
+            ),
+            4: (
+                "**Level 4 – Extreme Danger (>$135K)**\n\n"
+                "• Price >$135K and Pi Cycle cross\n\n"
+                "• MVRV Z‑Score >7.0\n\n"
+                "• Funding rates >1%\n\n"
+                "• Escalated sell‑off risk\n"
+            ),
+        }
+        if local_level is not None:
+            st.warning(level_desc.get(local_level, ""), icon="⚠️")
+        else:
+            st.info("No escalation level triggered.")
+        st.markdown("---")
+        st.subheader("Critical Success Factors")
+        st.markdown(
+            """
+            * **Never rely on a single indicator:** require at least three signals (MVRV Z, LTH‑SOPR, Pi Cycle, exchange inflows, reserve risk) for high confidence.
+            * **Monitor daily:** track MVRV progression, exchange flows and funding rates each day to catch rapid changes.
+            * **Historical timing:** prior cycle tops have occurred ~1,060 days from the cycle low, suggesting the next major top could emerge around **September 2025** (although the ETF era may alter patterns).
+            * **Risk management:** reduce positions as the escalation levels increase; levels 3 and 4 warrant aggressive de‑risking.
+            * **Market evolution:** recognise that ETF inflows and changing macro conditions can shift the behaviour of these metrics.
+            
+            * **Multi‑domain integration:** your framework adds macro‑economic factors, derivatives market depth, mining stress signals and DeFi/altcoin rotation to the crypto‑native metrics, providing a more holistic view.
+            * **Lead time optimisation:** indicators are organised by lead time (1–3 months ahead) to help with early positioning.
+            * **Risk management structure:** the four‑tier escalation system guides position sizing as risk conditions evolve.
+            """
+        )
 
 
 if __name__ == "__main__":
