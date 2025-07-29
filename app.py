@@ -1,0 +1,590 @@
+"""
+Bitcoin Cycle Top Indicator Dashboard
+===================================
+
+This Streamlit application aggregates on‑chain, exchange, macro and
+technical data to help identify bitcoin market cycle tops. It fetches
+metrics from several third‑party APIs, computes trend indicators and
+displays them on an interactive dashboard. The user must provide a
+Glassnode API key to access on‑chain indicators such as MVRV Z‑Score,
+Long Term Holder SOPR and Reserve Risk. Other data are pulled from
+public sources like Coingecko (Bitcoin dominance and price), Binance
+(funding rate), DefiLlama (DeFi TVL), and yfinance (10‑year Treasury
+yield).
+
+High confidence signals for cycle tops emerge when at least three
+conditions align: an elevated MVRV Z‑Score (>6), surging long‑term
+holder SOPR (>8), a looming Pi Cycle MA cross, high exchange inflows
+($10B+ monthly) and rising reserve risk (>0.015). Escalation levels
+capture broader market context such as BTC dominance, funding rates,
+DeFi capital flows and macro yields. When multiple warning levels
+activate, the dashboard highlights the increased probability of a
+cycle peak.
+
+This code is intended to run in a cloud environment. Ensure that
+`streamlit run app.py` is executed from the project root. To avoid
+exposing your Glassnode API key, supply it via an environment
+variable called `GLASSNODE_API_KEY` or enter it in the sidebar input.
+"""
+
+import os
+import time
+import datetime as dt
+from typing import Optional, Tuple, Dict
+
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+import plotly.express as px
+import yfinance as yf
+
+
+###############################################################################
+# Helpers for remote data fetching
+###############################################################################
+
+def _glassnode_get(endpoint: str, api_key: str, params: Optional[Dict[str, str]] = None) -> Optional[pd.DataFrame]:
+    """Fetch a timeseries metric from Glassnode.
+
+    Parameters
+    ----------
+    endpoint : str
+        The endpoint path under `/v1/metrics`. For example,
+        ``'market/mvrv_z_score'``.
+    api_key : str
+        Your Glassnode API key.
+    params : dict, optional
+        Additional query parameters. Always includes asset (a) and
+        interval (i) by default.
+
+    Returns
+    -------
+    DataFrame or None
+        Returns a DataFrame indexed by datetime with a single
+        'value' column. Returns None if the request fails.
+    """
+    if not api_key:
+        return None
+    base_url = f"https://api.glassnode.com/v1/metrics/{endpoint}"
+    # Default parameters: bitcoin asset at daily resolution
+    params = params.copy() if params else {}
+    params.setdefault("a", "BTC")
+    params.setdefault("i", "1d")
+    params.setdefault("api_key", api_key)
+    try:
+        resp = requests.get(base_url, params=params, timeout=30)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        # Expect list of {t: timestamp, v: value}
+        df = pd.DataFrame(data)
+        if df.empty or 't' not in df.columns:
+            return None
+        df['t'] = pd.to_datetime(df['t'], unit='s')
+        df.set_index('t', inplace=True)
+        # rename value column if present
+        value_col = None
+        if 'v' in df.columns:
+            value_col = 'v'
+        elif 'o' in df.columns:
+            value_col = 'o'
+        else:
+            # unknown schema
+            return None
+        df = df[[value_col]].rename(columns={value_col: 'value'})
+        return df
+    except Exception:
+        return None
+
+
+def fetch_mvrv_zscore(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
+    """Fetch MVRV Z‑Score from Glassnode.
+
+    The MVRV Z‑Score compares Bitcoin's market value to its realized value
+    and normalizes by the standard deviation of market value, identifying
+    periods where the price is extremely overvalued or undervalued【475926368150572†L216-L244】.
+
+    Returns the last `days` observations.
+    """
+    df = _glassnode_get("market/mvrv_z_score", api_key)
+    if df is None:
+        return None
+    return df.tail(days)
+
+
+def fetch_lth_sopr(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
+    """Fetch Long Term Holder SOPR (spent output profit ratio) from Glassnode.
+
+    LTH‑SOPR filters UTXOs older than 155 days and measures
+    realised profit and loss only for coins moved on‑chain that have a
+    lifespan more than 155 days【474942229923549†L79-L83】. Values above
+    1 indicate holders selling at a profit.
+    """
+    df = _glassnode_get("indicators/sopr_more_155", api_key)
+    if df is None:
+        return None
+    return df.tail(days)
+
+
+def fetch_reserve_risk(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
+    """Fetch Reserve Risk from Glassnode【474942229923549†L90-L92】.
+
+    Reserve Risk measures the conviction of long‑term holders relative to
+    the price; high values (>0.015) indicate declining confidence
+    and potential for market tops【118412254918152†L219-L248】.
+    """
+    df = _glassnode_get("indicators/reserve_risk", api_key)
+    if df is None:
+        return None
+    return df.tail(days)
+
+
+def fetch_exchange_inflows(api_key: str, days: int = 90) -> Optional[pd.DataFrame]:
+    """Fetch total volume of coins transferred to exchanges (in native units).
+
+    Parameters
+    ----------
+    api_key : str
+        Glassnode API key.
+    days : int
+        Number of days of history to return.
+    """
+    df = _glassnode_get("transactions/transfers_volume_to_exchanges_sum", api_key)
+    if df is None:
+        return None
+    return df.tail(days)
+
+
+def fetch_btc_dominance() -> Optional[float]:
+    """Fetch Bitcoin market dominance percentage from Coingecko global data【644653073643528†L40-L43】.
+    Returns a float representing BTC dominance (0‑100) or None if unavailable.
+    """
+    try:
+        resp = requests.get("https://api.coingecko.com/api/v3/global", timeout=30)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        dominance = data.get('data', {}).get('market_cap_percentage', {}).get('btc')
+        if dominance is None:
+            return None
+        return float(dominance)
+    except Exception:
+        return None
+
+
+def fetch_funding_rate() -> Optional[float]:
+    """Fetch the most recent funding rate for BTC perpetual futures from Binance【789894824174857†L93-L136】.
+
+    Funding rates are expressed as decimal fractions (e.g., 0.01 for 1%).
+    Returns None if unavailable.
+    """
+    url = "https://fapi.binance.com/fapi/v1/fundingRate"
+    params = {"symbol": "BTCUSDT", "limit": 1}
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if isinstance(data, list) and data:
+            rate = float(data[0].get('fundingRate', 0))
+            return rate
+        return None
+    except Exception:
+        return None
+
+
+def fetch_defi_tvl_growth(chain: str = "Ethereum", lookback_days: int = 30) -> Optional[float]:
+    """Compute DeFi Total Value Locked (TVL) growth over a period.
+
+    The function retrieves historical TVL data for a given chain from
+    DefiLlama's v2 API. It then calculates the percentage growth over
+    `lookback_days`. The API returns daily TVL values measured in USD.
+
+    Parameters
+    ----------
+    chain : str
+        Name of the chain. Defaults to ``'Ethereum'``.
+    lookback_days : int
+        Number of days to look back. Growth is computed from the
+        difference between the most recent TVL and the value
+        `lookback_days` earlier.
+
+    Returns
+    -------
+    float or None
+        Percentage growth over the period (0.25 means 25%). Returns
+        None if data cannot be fetched.
+    """
+    url = f"https://api.llama.fi/v2/historicalChainTvl/{chain}"
+    try:
+        resp = requests.get(url, timeout=30)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            return None
+        df = pd.DataFrame(data)
+        if 'date' not in df.columns or 'tvl' not in df.columns:
+            return None
+        df['date'] = pd.to_datetime(df['date'], unit='s')
+        df.sort_values('date', inplace=True)
+        df.set_index('date', inplace=True)
+        # ensure enough data
+        if len(df) < lookback_days + 1:
+            return None
+        latest = df.iloc[-1]['tvl']
+        past = df.iloc[-lookback_days - 1]['tvl']
+        if past == 0:
+            return None
+        growth = (latest - past) / past
+        return float(growth)
+    except Exception:
+        return None
+
+
+def fetch_treasury_yield() -> Optional[float]:
+    """Fetch the current 10‑year US Treasury yield using yfinance.
+
+    The ^TNX ticker on Yahoo Finance quotes the CBOE 10‑Year Treasury Note
+    Yield Index in terms of percentage points times 10. Therefore, a
+    closing price of 45 represents a yield of 4.5%. Returns the
+    latest closing yield as a percentage (e.g., 4.5).
+    """
+    try:
+        df = yf.download("^TNX", period="5d", interval="1d", progress=False)
+        if df.empty or 'Close' not in df.columns:
+            return None
+        latest = df['Close'].iloc[-1]
+        yield_percent = float(latest) / 10.0
+        return yield_percent
+    except Exception:
+        return None
+
+
+def fetch_price_history(days: Optional[int] = None) -> Optional[pd.DataFrame]:
+    """Fetch historical Bitcoin price data from Coingecko.
+
+    Parameters
+    ----------
+    days : int or None
+        Number of days to return. If None, returns the full history.
+
+    Returns
+    -------
+    DataFrame or None
+        Daily price history with datetime index and 'price' column.
+    """
+    # Use 'max' to get all available data
+    range_param = days if days is not None else 'max'
+    url = f"https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    params = {"vs_currency": "usd", "days": range_param, "interval": "daily"}
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        prices = data.get('prices')
+        if not prices:
+            return None
+        df = pd.DataFrame(prices, columns=['timestamp', 'price'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df
+    except Exception:
+        return None
+
+
+def compute_pi_cycle_cross(price_df: pd.DataFrame) -> Tuple[bool, bool, pd.DataFrame]:
+    """Compute the Pi Cycle moving averages and detect crossovers.
+
+    The Pi Cycle Top indicator compares a 111‑day simple moving average (SMA)
+    of price with twice the 350‑day SMA. When the shorter 111‑day SMA
+    crosses above the 2×350‑day SMA, it historically marks major cycle
+    tops. This function computes the SMAs and returns whether a cross
+    has occurred, whether it is approaching (111SMA close to 2×350SMA),
+    and a dataframe containing the moving averages for plotting.
+
+    Parameters
+    ----------
+    price_df : DataFrame
+        DataFrame with datetime index and 'price' column.
+
+    Returns
+    -------
+    (bool, bool, DataFrame)
+        A tuple of (cross_occurred, approaching, ma_df). The boolean
+        `cross_occurred` is True if the most recent 111SMA is above
+        2×350SMA. `approaching` is True if the difference is small but
+        not yet crossed. `ma_df` contains columns '111sma' and '2x350sma'.
+    """
+    ma_df = pd.DataFrame(index=price_df.index)
+    ma_df['111sma'] = price_df['price'].rolling(window=111).mean()
+    ma_df['350sma'] = price_df['price'].rolling(window=350).mean()
+    ma_df['2x350sma'] = ma_df['350sma'] * 2.0
+    # latest values
+    latest = ma_df.dropna().iloc[-1]
+    cross = bool(latest['111sma'] > latest['2x350sma']) if not np.isnan(latest['111sma']) and not np.isnan(latest['2x350sma']) else False
+    # approaching: within 1% margin but not crossed
+    approaching = False
+    if not cross and not np.isnan(latest['111sma']) and not np.isnan(latest['2x350sma']):
+        diff = latest['2x350sma'] - latest['111sma']
+        if latest['2x350sma'] != 0:
+            pct_diff = abs(diff) / latest['2x350sma']
+            approaching = pct_diff < 0.02  # within 2%
+    return cross, approaching, ma_df[['111sma', '2x350sma']]
+
+
+###############################################################################
+# Dashboard display logic
+###############################################################################
+
+def display_metric_card(col, title: str, value: Optional[float], threshold: Optional[float] = None,
+                        unit: str = '', higher_is_warning: bool = True):
+    """Render a coloured metric card with optional threshold comparison.
+
+    Parameters
+    ----------
+    col : st.columns element
+        Streamlit column in which to render the metric.
+    title : str
+        Title of the metric.
+    value : float or None
+        Current value of the metric. Displays 'N/A' if None.
+    threshold : float, optional
+        Value at which the metric triggers a warning.
+    unit : str
+        Unit suffix to append to the value (e.g., '%').
+    higher_is_warning : bool
+        If True, values above the threshold are considered warning; if False,
+        values below the threshold are considered warning.
+    """
+    if value is None:
+        col.metric(title, "N/A")
+        return
+    display_val = f"{value:.3f}{unit}" if abs(value) >= 1e-3 else f"{value:.3e}{unit}"
+    if threshold is not None:
+        warn = (value > threshold) if higher_is_warning else (value < threshold)
+        color = "#ffd5d5" if warn else "#e5ffd5"  # red tint for warning, green for normal
+        col.markdown(
+            f"<div style='padding:10px;border-radius:5px;background-color:{color};text-align:center'>"
+            f"<b>{title}</b><br><span style='font-size:24px'>{display_val}</span></div>",
+            unsafe_allow_html=True
+        )
+    else:
+        col.metric(title, display_val)
+
+
+def main():
+    st.set_page_config(page_title="Bitcoin Cycle Top Indicator", layout="wide")
+    st.title("🚀 Bitcoin Cycle Top Indicator Dashboard")
+    st.markdown(
+        """
+        This dashboard synthesises on‑chain metrics, exchange flows and
+        macro indicators to highlight when bitcoin may be approaching
+        a major cycle top. Select your parameters in the sidebar and
+        monitor the gauges below. A **high confidence signal** occurs
+        when at least three of the five primary indicators align. The
+        escalation levels summarise broader market conditions and help
+        manage risk.
+        """
+    )
+
+    # Sidebar for user inputs
+    st.sidebar.header("Configuration")
+    api_key_env = os.environ.get("GLASSNODE_API_KEY", "")
+    api_key = st.sidebar.text_input(
+        "Glassnode API Key", value=api_key_env, type="password",
+        help="Required for on‑chain metrics (MVRV Z, LTH‑SOPR, Reserve Risk, Exchange Inflows)."
+    )
+    chain = st.sidebar.selectbox("DeFi chain for TVL", options=["Ethereum", "BSC", "Arbitrum", "Polygon"], index=0)
+    lookback_days = st.sidebar.number_input("TVL growth lookback days", 7, 90, 30)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("<small>Data sources: Glassnode, Coingecko, Binance, DefiLlama, yfinance.</small>", unsafe_allow_html=True)
+
+    # Fetch data
+    with st.spinner("Fetching data…"):
+        mvrv_df = fetch_mvrv_zscore(api_key, days=730)
+        lth_df = fetch_lth_sopr(api_key, days=730)
+        reserve_df = fetch_reserve_risk(api_key, days=730)
+        inflow_df = fetch_exchange_inflows(api_key, days=90)
+        btc_dom = fetch_btc_dominance()
+        funding_rate = fetch_funding_rate()
+        defi_growth = fetch_defi_tvl_growth(chain, lookback_days)
+        treasury_yield = fetch_treasury_yield()
+        price_df = fetch_price_history(days=None)
+
+        # compute Pi cycle
+        pi_cross = (False, False, None)
+        if price_df is not None and len(price_df) >= 350:
+            pi_cross = compute_pi_cycle_cross(price_df)
+
+    # Compute monthly exchange inflows in USD if possible
+    monthly_inflow_usd = None
+    if inflow_df is not None and price_df is not None:
+        # Align price and inflow
+        # Convert inflow (native units) to USD by multiplying with
+        # daily closing price (approx). We forward‑fill price as needed.
+        inflow_daily = inflow_df.copy()
+        # Resample price to daily and forward fill
+        price_daily = price_df['price'].resample('1D').last().ffill()
+        combined = inflow_daily.join(price_daily, how='inner')
+        combined['usd'] = combined['value'] * combined['price']
+        # Sum over last 30 days (or lookback)
+        monthly_inflow_usd = combined['usd'].tail(30).sum()
+
+    # Latest values for metrics
+    latest_mvrv = mvrv_df.iloc[-1]['value'] if mvrv_df is not None and not mvrv_df.empty else None
+    latest_lth = lth_df.iloc[-1]['value'] if lth_df is not None and not lth_df.empty else None
+    latest_reserve = reserve_df.iloc[-1]['value'] if reserve_df is not None and not reserve_df.empty else None
+    latest_inflow = monthly_inflow_usd / 1e9 if monthly_inflow_usd is not None else None  # convert to billions
+    # Pi cycle cross results
+    pi_cross_occured, pi_approaching, ma_df = pi_cross
+
+    # Determine high confidence alignment
+    signals = []
+    if latest_mvrv is not None and latest_mvrv > 6.0:
+        signals.append("MVRV Z > 6")
+    if latest_lth is not None and latest_lth > 8.0:
+        signals.append("LTH‑SOPR > 8")
+    if pi_cross_occured or pi_approaching:
+        signals.append("Pi Cycle approaching/cross")
+    if latest_inflow is not None and latest_inflow > 10.0:
+        signals.append("Exchange inflows > $10B")
+    if latest_reserve is not None and latest_reserve > 0.015:
+        signals.append("Reserve Risk > 0.015")
+
+    high_confidence = len(signals) >= 3
+
+    # Layout: metrics row
+    cols = st.columns(5)
+    display_metric_card(cols[0], "MVRV Z‑Score", latest_mvrv, threshold=6.0, unit="", higher_is_warning=True)
+    display_metric_card(cols[1], "LTH‑SOPR", latest_lth, threshold=8.0, unit="", higher_is_warning=True)
+    # For Pi cycle: show difference or status as numeric (1 for cross, 0 for approaching, negative for far)
+    pi_status_val = None
+    if price_df is not None and ma_df is not None:
+        diff = ma_df.iloc[-1]['111sma'] - ma_df.iloc[-1]['2x350sma']
+        # Represent status: positive implies cross occurred, negative implies not yet
+        pi_status_val = diff / ma_df.iloc[-1]['2x350sma'] if ma_df.iloc[-1]['2x350sma'] != 0 else None
+    display_metric_card(cols[2], "Pi Cycle Status", pi_status_val, threshold=0.0, unit="", higher_is_warning=True)
+    display_metric_card(cols[3], "Exchange inflow (30d, $B)", latest_inflow, threshold=10.0, unit="B", higher_is_warning=True)
+    display_metric_card(cols[4], "Reserve Risk", latest_reserve, threshold=0.015, unit="", higher_is_warning=True)
+
+    # Additional metrics row
+    cols2 = st.columns(4)
+    display_metric_card(cols2[0], "BTC dominance", btc_dom, threshold=65.0, unit="%", higher_is_warning=True)
+    display_metric_card(cols2[1], "Funding rate", funding_rate, threshold=0.05, unit="", higher_is_warning=True)
+    display_metric_card(cols2[2], f"DeFi TVL {chain} growth {lookback_days}d", defi_growth, threshold=0.25, unit="", higher_is_warning=True)
+    display_metric_card(cols2[3], "10Y Treasury yield", treasury_yield, threshold=4.5, unit="%", higher_is_warning=True)
+
+    # High confidence signal display
+    if high_confidence:
+        st.success(f"High Confidence Signal: {len(signals)}/5 metrics align → {', '.join(signals)}")
+    else:
+        st.info(f"Signals aligning: {len(signals)}/5 → {', '.join(signals) if signals else 'None'}")
+
+    # Escalation levels based on approximate price and metrics
+    # Determine current price from price_df
+    current_price = price_df.iloc[-1]['price'] if price_df is not None else None
+    st.markdown("---")
+    st.subheader("Escalation Levels")
+    level = None
+    # Define conditions for each level
+    if current_price is not None:
+        # Level 4: price >135k and cross and MVRV >7 and funding rate >1
+        cond4 = (current_price > 135000) and (latest_mvrv is not None and latest_mvrv > 7.0) and (pi_cross_occured) and (funding_rate is not None and funding_rate > 1.0)
+        # Level 3: price >130k and MVRV >6 and btc dom <60 and funding rate >0.1 and at least two signals
+        cond3 = (current_price > 130000) and (latest_mvrv is not None and latest_mvrv > 6.0) and (btc_dom is not None and btc_dom < 60.0) and (funding_rate is not None and funding_rate > 0.1) and (len(signals) >= 2)
+        # Level 2: price >120k and MVRV >5 and BTC dom declining (proxy: btc_dom < 65) and funding rate < 0.05 or call ratio not available
+        cond2 = (current_price > 120000) and (latest_mvrv is not None and latest_mvrv > 5.0) and (btc_dom is not None and btc_dom < 65.0) and (funding_rate is not None and funding_rate > 0.01)
+        # Level 1: price >110k and BTC dom >65 and funding >0.05 and defi growth >25% and treasury yield >4.5
+        cond1 = (current_price > 110000) and (btc_dom is not None and btc_dom > 65.0) and (funding_rate is not None and funding_rate > 0.05) and (defi_growth is not None and defi_growth > 0.25) and (treasury_yield is not None and treasury_yield > 4.5)
+        if cond4:
+            level = 4
+        elif cond3:
+            level = 3
+        elif cond2:
+            level = 2
+        elif cond1:
+            level = 1
+
+    # Describe escalation levels
+    level_descriptions = {
+        1: "**Level 1 – Early Warning ($110K–$120K)**\n\n"
+           "• BTC dominance peaks >65%\n\n"
+           "• Funding rates >0.05%\n\n"
+           "• DeFi TVL growth >25% monthly\n\n"
+           "• 10Y Treasury yield approaching 4.5%\n",
+        2: "**Level 2 – Caution Zone ($120K–$130K)**\n\n"
+           "• MVRV Z‑Score >5.0\n\n"
+           "• BTC dominance declining from peak\n\n"
+           "• Hash rate plateau signals\n\n"
+           "• Put/call ratios <0.5\n",
+        3: "**Level 3 – High Risk ($130K–$135K)**\n\n"
+           "• MVRV Z‑Score >6.0\n\n"
+           "• BTC dominance <60%\n\n"
+           "• Funding rates >0.1%\n\n"
+           "• Multiple indicators aligning\n",
+        4: "**Level 4 – Extreme Danger (>$135K)**\n\n"
+           "• MVRV Z‑Score >7.0\n\n"
+           "• Pi Cycle Top cross confirmed\n\n"
+           "• Funding rates >1.0%\n\n"
+           "• All systems flashing red\n",
+    }
+
+    if level:
+        st.error(f"Escalation Level {level} activated")
+        st.markdown(level_descriptions[level])
+    else:
+        st.success("Escalation: No immediate danger detected.")
+        st.markdown("\n".join([desc for desc in level_descriptions.values()]))
+
+    # Plotting MVRV, LTH SOPR and Reserve Risk
+    st.markdown("---")
+    st.subheader("On‑chain Metrics Over Time")
+    chart_df = pd.DataFrame()
+    if mvrv_df is not None:
+        chart_df['MVRV Z'] = mvrv_df['value']
+    if lth_df is not None:
+        chart_df['LTH SOPR'] = lth_df['value']
+    if reserve_df is not None:
+        chart_df['Reserve Risk'] = reserve_df['value']
+    if not chart_df.empty:
+        fig = px.line(chart_df, x=chart_df.index, y=chart_df.columns, labels={"value": "Value", "index": "Date"},
+                      title="On‑chain Indicators")
+        fig.update_layout(legend_title_text='Metric', height=400)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("On‑chain data not available. Provide a valid Glassnode API key.")
+
+    # Plot Pi cycle moving averages if available
+    if price_df is not None and ma_df is not None:
+        st.subheader("Pi Cycle Moving Averages")
+        fig2 = px.line(ma_df.dropna(), x=ma_df.dropna().index, y=['111sma', '2x350sma'], labels={"value": "Price", "index": "Date"},
+                       title="111‑day SMA vs 2×350‑day SMA")
+        fig2.update_layout(legend_title_text='MA', height=400)
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # Show raw signals for reference
+    st.markdown("---")
+    st.subheader("Critical Success Factors")
+    st.markdown(
+        """
+        * **Never rely on a single indicator:** require at least three signals
+          (MVRV Z, LTH‑SOPR, Pi Cycle, exchange inflows, reserve risk) for
+          high confidence.
+        * **Monitor daily:** track MVRV progression, exchange flows and funding
+          rates each day to catch rapid changes.
+        * **Historical timing:** prior cycle tops have occurred ~1,060 days from the
+          cycle low, suggesting the next major top could emerge around
+          **September 2025** (although the ETF era may alter patterns).
+        * **Risk management:** reduce positions as the escalation levels
+          increase; levels 3 and 4 warrant aggressive de‑risking.
+        * **Market evolution:** recognise that ETF inflows and changing
+          macro conditions can shift the behaviour of these metrics.
+        """
+    )
+
+
+if __name__ == "__main__":
+    main()
