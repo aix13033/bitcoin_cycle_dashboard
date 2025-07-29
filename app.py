@@ -540,12 +540,14 @@ def main():
         # Sum the last 30 days of ETF flows in BTC
         monthly_inflow_btc = inflow_df['value'].tail(30).sum()
         if price_df is not None and not price_df.empty:
-            # Resample price to daily and forward fill
-            price_daily = price_df['price'].resample('1D').last().ffill()
+            # Resample price to daily and forward fill, convert to DataFrame with a proper column name
+            price_daily = price_df['price'].resample('1D').last().ffill().to_frame(name='price')
+            # Join on index
             combined = inflow_df.join(price_daily, how='inner')
-            # convert to USD
-            combined['usd'] = combined['value'] * combined['price']
-            monthly_inflow_usd = combined['usd'].tail(30).sum()
+            # Multiply only if both columns exist
+            if 'value' in combined.columns and 'price' in combined.columns:
+                combined['usd'] = combined['value'] * combined['price']
+                monthly_inflow_usd = combined['usd'].tail(30).sum()
 
     # Latest values for metrics
     latest_mvrv = mvrv_df.iloc[-1]['value'] if mvrv_df is not None and not mvrv_df.empty else None
