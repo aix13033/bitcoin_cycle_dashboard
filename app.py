@@ -525,7 +525,15 @@ def main() -> None:
     )
 
     # Coinglass API Key input for bull market peak signals
-    coinglass_env = os.environ.get("COINGLASS_API_KEY", "")
+    # Retrieve Coinglass API key from environment or Streamlit secrets for convenience.
+    # Users can set COINGLASS_API_KEY as an environment variable or define
+    # `coinglass_api_key` or `[coinglass] api_key` in `.streamlit/secrets.toml`.
+    coinglass_env = (
+        os.environ.get("COINGLASS_API_KEY")
+        or getattr(st, "secrets", {}).get("coinglass_api_key")
+        or (getattr(st, "secrets", {}).get("coinglass", {}) or {}).get("api_key")
+        or ""
+    )
     coinglass_key = st.sidebar.text_input(
         "Coinglass API Key",
         value=coinglass_env,
@@ -561,10 +569,11 @@ def main() -> None:
             monthly_inflow_btc = float(inflow_df['value'].tail(30).sum())
         # Convert to USD if price data available
         if price_df is not None and not price_df.empty and monthly_inflow_btc is not None:
-            # Resample price to daily and forward fill.  Convert the resulting Series into a DataFrame
-            price_daily = price_df['price'].resample('1D').last().ffill().to_frame(name='price')
+            # Resample price to daily and forward fill.  Use DataFrame-level resample to support pandas>=3
+            # (Series.resample was removed in pandas 3, so we resample the DataFrame instead).
+            price_daily_df = price_df[['price']].resample('1D').last().ffill()
             # Join the inflow series with the daily price on the date index
-            combined = inflow_df.join(price_daily, how='inner')
+            combined = inflow_df.join(price_daily_df, how='inner')
             if {'value', 'price'}.issubset(combined.columns) and not combined.empty:
                 combined['usd'] = combined['value'] * combined['price']
                 monthly_inflow_usd = float(combined['usd'].tail(30).sum())
