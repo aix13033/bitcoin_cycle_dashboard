@@ -573,7 +573,8 @@ def main() -> None:
             # (Series.resample was removed in pandas 3, so we resample the DataFrame instead).
             price_daily_df = price_df[['price']].resample('1D').last().ffill()
             # Join the inflow series with the daily price on the date index
-            combined = inflow_df.join(price_daily_df, how='inner')
+            # Use pd.concat to align by index and avoid merge errors when joining on index
+            combined = pd.concat([inflow_df, price_daily_df], axis=1, join='inner')
             if {'value', 'price'}.issubset(combined.columns) and not combined.empty:
                 combined['usd'] = combined['value'] * combined['price']
                 monthly_inflow_usd = float(combined['usd'].tail(30).sum())
