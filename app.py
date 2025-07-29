@@ -5,9 +5,10 @@ Bitcoin Cycle Top Indicator Dashboard
 This Streamlit application aggregates on‑chain, exchange, macro and
 technical data to help identify bitcoin market cycle tops. It fetches
 metrics from several third‑party APIs, computes trend indicators and
-displays them on an interactive dashboard. The user must provide a
-Glassnode API key to access on‑chain indicators such as MVRV Z‑Score,
-Long Term Holder SOPR and Reserve Risk. Other data are pulled from
+displays them on an interactive dashboard. The on‑chain metrics
+(MVRV Z‑Score, Long Term Holder SOPR and Reserve Risk) are obtained
+from the free **BGeometrics Bitcoin Data API**, which does not
+require an API key and is rate‑limited. Other data are pulled from
 public sources like Coingecko (Bitcoin dominance and price), Binance
 (funding rate), DefiLlama (DeFi TVL), and yfinance (10‑year Treasury
 yield).
@@ -44,62 +45,63 @@ import yfinance as yf
 # Helpers for remote data fetching
 ###############################################################################
 
-def _glassnode_get(endpoint: str, api_key: str, params: Optional[Dict[str, str]] = None) -> Optional[pd.DataFrame]:
-    """Fetch a timeseries metric from Glassnode.
+def _bgeometrics_get(endpoint: str, value_field: str, days: int = None) -> Optional[pd.DataFrame]:
+    """
+    Fetch a timeseries metric from the free BGeometrics on‑chain API.
 
     Parameters
     ----------
     endpoint : str
-        The endpoint path under `/v1/metrics`. For example,
-        ``'market/mvrv_z_score'``.
-    api_key : str
-        Your Glassnode API key.
-    params : dict, optional
-        Additional query parameters. Always includes asset (a) and
-        interval (i) by default.
+        The metric endpoint path under ``/api/v1``. For example,
+        ``'mvrv-zscore'`` or ``'lth-sopr'``.
+    value_field : str
+        Name of the JSON field that contains the metric value (e.g. 'mvrvZscore').
+    days : int, optional
+        If provided, returns only the last `days` observations.
 
     Returns
     -------
     DataFrame or None
-        Returns a DataFrame indexed by datetime with a single
-        'value' column. Returns None if the request fails.
+        DataFrame indexed by datetime with a single 'value' column, or
+        None if the request fails.
+
+    Notes
+    -----
+    The Bitcoin Data API from BGeometrics provides on‑chain metrics
+    without requiring an API key. Data is updated daily and rate‑limited.
     """
-    if not api_key:
-        return None
-    base_url = f"https://api.glassnode.com/v1/metrics/{endpoint}"
-    # Default parameters: bitcoin asset at daily resolution
-    params = params.copy() if params else {}
-    params.setdefault("a", "BTC")
-    params.setdefault("i", "1d")
-    params.setdefault("api_key", api_key)
+    base_url = f"https://bitcoin-data.com/api/v1/{endpoint}"
     try:
-        resp = requests.get(base_url, params=params, timeout=30)
+        resp = requests.get(base_url, timeout=30)
         if resp.status_code != 200:
             return None
         data = resp.json()
-        # Expect list of {t: timestamp, v: value}
+        if not isinstance(data, list):
+            return None
         df = pd.DataFrame(data)
-        if df.empty or 't' not in df.columns:
-            return None
-        df['t'] = pd.to_datetime(df['t'], unit='s')
-        df.set_index('t', inplace=True)
-        # rename value column if present
-        value_col = None
-        if 'v' in df.columns:
-            value_col = 'v'
-        elif 'o' in df.columns:
-            value_col = 'o'
+        # Use 'unixTs' if present to build datetime index; fallback to 'd' (string date)
+        if 'unixTs' in df.columns:
+            df['t'] = pd.to_datetime(df['unixTs'], unit='s')
+        elif 'd' in df.columns:
+            df['t'] = pd.to_datetime(df['d'])
         else:
-            # unknown schema
             return None
-        df = df[[value_col]].rename(columns={value_col: 'value'})
+        df.set_index('t', inplace=True)
+        if value_field not in df.columns:
+            return None
+        # Convert numeric values; some early rows may contain nulls
+        df['value'] = pd.to_numeric(df[value_field], errors='coerce')
+        df = df[['value']].dropna()
+        if days is not None and len(df) > days:
+            return df.tail(days)
         return df
     except Exception:
         return None
 
 
-def fetch_mvrv_zscore(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
-    """Fetch MVRV Z‑Score from Glassnode.
+def fetch_mvrv_zscore(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
+    """
+    Fetch MVRV Z‑Score from the BGeometrics API.
 
     The MVRV Z‑Score compares Bitcoin's market value to its realized value
     and normalizes by the standard deviation of market value, identifying
@@ -107,53 +109,48 @@ def fetch_mvrv_zscore(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
 
     Returns the last `days` observations.
     """
-    df = _glassnode_get("market/mvrv_z_score", api_key)
-    if df is None:
-        return None
-    return df.tail(days)
+    # endpoint returns full history; value field is 'mvrvZscore'
+    return _bgeometrics_get("mvrv-zscore", "mvrvZscore", days=days)
 
 
-def fetch_lth_sopr(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
-    """Fetch Long Term Holder SOPR (spent output profit ratio) from Glassnode.
-
-    LTH‑SOPR filters UTXOs older than 155 days and measures
-    realised profit and loss only for coins moved on‑chain that have a
-    lifespan more than 155 days【474942229923549†L79-L83】. Values above
-    1 indicate holders selling at a profit.
+def fetch_lth_sopr(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
     """
-    df = _glassnode_get("indicators/sopr_more_155", api_key)
-    if df is None:
-        return None
-    return df.tail(days)
+    Fetch Long Term Holder SOPR (spent output profit ratio) from the BGeometrics API.
+
+    LTH‑SOPR filters UTXOs older than 155 days and measures realised profit
+    and loss only for coins moved on‑chain that have a lifespan more than
+    155 days【474942229923549†L79-L83】. Values above 1 indicate holders selling at a profit.
+    """
+    return _bgeometrics_get("lth-sopr", "lthSopr", days=days)
 
 
-def fetch_reserve_risk(api_key: str, days: int = 730) -> Optional[pd.DataFrame]:
-    """Fetch Reserve Risk from Glassnode【474942229923549†L90-L92】.
+def fetch_reserve_risk(api_key: str = "", days: int = 730) -> Optional[pd.DataFrame]:
+    """
+    Fetch Reserve Risk from the BGeometrics API【474942229923549†L90-L92】.
 
     Reserve Risk measures the conviction of long‑term holders relative to
-    the price; high values (>0.015) indicate declining confidence
-    and potential for market tops【118412254918152†L219-L248】.
+    the price; high values (>0.015) indicate declining confidence and
+    potential for market tops【118412254918152†L219-L248】.
     """
-    df = _glassnode_get("indicators/reserve_risk", api_key)
-    if df is None:
-        return None
-    return df.tail(days)
+    return _bgeometrics_get("reserve-risk", "reserveRisk", days=days)
 
 
-def fetch_exchange_inflows(api_key: str, days: int = 90) -> Optional[pd.DataFrame]:
-    """Fetch total volume of coins transferred to exchanges (in native units).
-
-    Parameters
-    ----------
-    api_key : str
-        Glassnode API key.
-    days : int
-        Number of days of history to return.
+def fetch_exchange_inflows(api_key: str = "", days: int = 30) -> Optional[pd.DataFrame]:
     """
-    df = _glassnode_get("transactions/transfers_volume_to_exchanges_sum", api_key)
-    if df is None:
-        return None
-    return df.tail(days)
+    Fetch proxy for exchange inflows using ETF BTC flow from the BGeometrics API.
+
+    The free API does not provide total exchange inflow volume. As a proxy,
+    we use the daily BTC flows into exchange‑traded funds (ETFs) which
+    aggregates flows from major spot Bitcoin ETFs. This metric still
+    reflects institutional demand and distribution patterns.
+
+    Returns
+    -------
+    DataFrame or None
+        DataFrame of daily ETF flows (BTC) with datetime index and 'value'
+        column. Only the last `days` observations are returned.
+    """
+    return _bgeometrics_get("etf-flow-btc", "etfFlow", days=days)
 
 
 def fetch_btc_dominance() -> Optional[float]:
@@ -392,15 +389,15 @@ def main():
 
     # Sidebar for user inputs
     st.sidebar.header("Configuration")
-    api_key_env = os.environ.get("GLASSNODE_API_KEY", "")
-    api_key = st.sidebar.text_input(
-        "Glassnode API Key", value=api_key_env, type="password",
-        help="Required for on‑chain metrics (MVRV Z, LTH‑SOPR, Reserve Risk, Exchange Inflows)."
-    )
+    # On‑chain metrics from BGeometrics do not require an API key, so we hide
+    # the Glassnode API input. If a GLASSNODE_API_KEY environment
+    # variable is set, it is ignored.
+    st.sidebar.markdown("<small>On‑chain metrics are sourced from the free BGeometrics API (no key required).</small>", unsafe_allow_html=True)
+    api_key = ""  # placeholder for compatibility; ignored by fetch functions
     chain = st.sidebar.selectbox("DeFi chain for TVL", options=["Ethereum", "BSC", "Arbitrum", "Polygon"], index=0)
     lookback_days = st.sidebar.number_input("TVL growth lookback days", 7, 90, 30)
     st.sidebar.markdown("---")
-    st.sidebar.markdown("<small>Data sources: Glassnode, Coingecko, Binance, DefiLlama, yfinance.</small>", unsafe_allow_html=True)
+    st.sidebar.markdown("<small>Data sources: BGeometrics, Coingecko, Binance, DefiLlama, yfinance.</small>", unsafe_allow_html=True)
 
     # Fetch data
     with st.spinner("Fetching data…"):
@@ -555,7 +552,7 @@ def main():
         fig.update_layout(legend_title_text='Metric', height=400)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("On‑chain data not available. Provide a valid Glassnode API key.")
+        st.info("On‑chain data not available. This may occur due to API rate limits.")
 
     # Plot Pi cycle moving averages if available
     if price_df is not None and ma_df is not None:
