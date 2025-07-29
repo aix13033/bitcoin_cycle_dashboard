@@ -26,6 +26,12 @@ levels based on broader market conditions.
 - **Escalation levels** describing early warning, caution, high risk
   and extreme danger scenarios.
 
+- **Bull Market Peak Signals (optional)**: The dashboard can pull the
+  latest bull market peak indicators from Coinglass’s API. These
+  signals include metrics like AHR999, Pi Cycle Top, Stock‑to‑Flow and
+  others. You must supply your own **Coinglass API key** via the
+  `COINGLASS_API_KEY` environment variable or the sidebar input.
+
 ## Requirements
 
 Install dependencies with pip:
@@ -38,6 +44,9 @@ No API key is required for on‑chain metrics because the app uses
 BGeometrics’ free Bitcoin Data API. However, the API is rate‑limited
 to approximately 30 requests per hour. Other data sources (Coingecko,
 Binance, DefiLlama, yfinance) do not require keys.
+
+If you want to display Coinglass bull market peak signals, set
+`COINGLASS_API_KEY` in your environment or enter it in the sidebar.
 
 ## Running the App
 
