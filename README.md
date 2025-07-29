@@ -75,10 +75,14 @@ Run the Streamlit application from the project root:
 streamlit run app.py
 ```
 
-The app will launch in your default web browser.  Adjust parameters
-such as the DeFi chain and TVL lookback window in the sidebar.  The
-dashboard will then display the latest metrics, highlight high
-confidence signals and show escalation levels.
+The app will launch in your default web browser.  The configuration
+sidebar has been removed, so the dashboard uses sensible defaults
+internally (DeFi chain = **Ethereum** and TVL lookback = **30 days**).
+If you need to change these values, edit the corresponding variables
+(`chain` and `lookback_days`) near the beginning of the `main()` function in
+`app.py`.  The dashboard will then display the latest metrics, highlight
+high confidence signals and show escalation levels without requiring
+any runtime configuration.
 
 ## Notes
 

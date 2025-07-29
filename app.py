@@ -509,36 +509,18 @@ def main() -> None:
         """
     )
 
-    # Sidebar for user inputs
-    st.sidebar.header("Configuration")
-    st.sidebar.markdown(
-        "<small>On‑chain metrics are sourced from the free BGeometrics API (no key required).</small>",
-        unsafe_allow_html=True
-    )
+    # Default parameters (sidebar removed)
+    # If you wish to customise these values, modify them here.
     api_key = ""  # placeholder for compatibility; ignored by fetch functions
-    chain = st.sidebar.selectbox("DeFi chain for TVL", options=["Ethereum", "BSC", "Arbitrum", "Polygon"], index=0)
-    lookback_days = st.sidebar.number_input("TVL growth lookback days", 7, 90, 30)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        "<small>Data sources: BGeometrics, Coingecko, Binance, DefiLlama, yfinance.</small>",
-        unsafe_allow_html=True
-    )
+    chain = "Ethereum"  # default chain for DeFi TVL growth
+    lookback_days = 30  # default lookback window for DeFi TVL growth
 
-    # Coinglass API Key input for bull market peak signals
-    # Retrieve Coinglass API key from environment or Streamlit secrets for convenience.
-    # Users can set COINGLASS_API_KEY as an environment variable or define
-    # `coinglass_api_key` or `[coinglass] api_key` in `.streamlit/secrets.toml`.
-    coinglass_env = (
+    # Retrieve Coinglass API key from environment or Streamlit secrets.  No sidebar input.
+    coinglass_key = (
         os.environ.get("COINGLASS_API_KEY")
         or getattr(st, "secrets", {}).get("coinglass_api_key")
         or (getattr(st, "secrets", {}).get("coinglass", {}) or {}).get("api_key")
         or ""
-    )
-    coinglass_key = st.sidebar.text_input(
-        "Coinglass API Key",
-        value=coinglass_env,
-        type="password",
-        help="Enter your Coinglass API key to fetch bull market peak indicators (optional).",
     )
 
     # Fetch data
@@ -806,7 +788,28 @@ def main() -> None:
             # Convert to boolean if values are strings
             triggered = df[hit_col].astype(str).str.lower().isin(["true", "1", "yes"]).sum()
             st.write(f"Indicators triggered: {triggered}/{len(df)}")
-        st.dataframe(df)
+        # Filter to display only critical indicators relevant for early top predictions.
+        # We keep rows whose name contains any of the specified keywords.  The list
+        # can be customised to include additional metrics as needed.
+        keywords = [
+            "mvrv",       # MVRV Z‑Score
+            "pi",         # Pi Cycle Top
+            "puell",      # Puell Multiple
+            "rsi",        # Long‑term RSI
+            "sopr",       # LTH SOPR / SOPR
+            "inflow",     # Exchange inflows / whale inflows
+            "funding",    # Funding rates (extreme or elevated)
+            "hash",       # Mining related (hash rate/ribbons)
+            "tvl",        # DeFi TVL (if provided by Coinglass)
+        ]
+        try:
+            mask = df[name_col].astype(str).str.lower().apply(
+                lambda x: any(kw in x for kw in keywords)
+            )
+            filtered_df = df[mask].reset_index(drop=True)
+        except Exception:
+            filtered_df = df
+        st.dataframe(filtered_df)
 
     # Show raw signals for reference
     st.markdown("---")
