@@ -409,32 +409,41 @@ def main():
         funding_rate = fetch_funding_rate()
         defi_growth = fetch_defi_tvl_growth(chain, lookback_days)
         treasury_yield = fetch_treasury_yield()
-        price_df = fetch_price_history(days=None)
+        # Fetch ~500 days of price data to compute Pi Cycle moving averages (350‑day and 111‑day).
+        price_df = fetch_price_history(days=500)
 
         # compute Pi cycle
         pi_cross = (False, False, None)
         if price_df is not None and len(price_df) >= 350:
             pi_cross = compute_pi_cycle_cross(price_df)
 
-    # Compute monthly exchange inflows in USD if possible
+    # Compute monthly ETF flows. We return BTC flows by default and convert
+    # to USD only if price history is available.
     monthly_inflow_usd = None
-    if inflow_df is not None and price_df is not None:
-        # Align price and inflow
-        # Convert inflow (native units) to USD by multiplying with
-        # daily closing price (approx). We forward‑fill price as needed.
-        inflow_daily = inflow_df.copy()
-        # Resample price to daily and forward fill
-        price_daily = price_df['price'].resample('1D').last().ffill()
-        combined = inflow_daily.join(price_daily, how='inner')
-        combined['usd'] = combined['value'] * combined['price']
-        # Sum over last 30 days (or lookback)
-        monthly_inflow_usd = combined['usd'].tail(30).sum()
+    monthly_inflow_btc = None
+    if inflow_df is not None:
+        # Sum the last 30 days of ETF flows in BTC
+        monthly_inflow_btc = inflow_df['value'].tail(30).sum()
+        if price_df is not None and not price_df.empty:
+            # Resample price to daily and forward fill
+            price_daily = price_df['price'].resample('1D').last().ffill()
+            combined = inflow_df.join(price_daily, how='inner')
+            # convert to USD
+            combined['usd'] = combined['value'] * combined['price']
+            monthly_inflow_usd = combined['usd'].tail(30).sum()
 
     # Latest values for metrics
     latest_mvrv = mvrv_df.iloc[-1]['value'] if mvrv_df is not None and not mvrv_df.empty else None
     latest_lth = lth_df.iloc[-1]['value'] if lth_df is not None and not lth_df.empty else None
     latest_reserve = reserve_df.iloc[-1]['value'] if reserve_df is not None and not reserve_df.empty else None
-    latest_inflow = monthly_inflow_usd / 1e9 if monthly_inflow_usd is not None else None  # convert to billions
+    # If USD conversion is available, display in billions USD; else display in BTC (divided by 1e3 to show thousands)
+    if monthly_inflow_usd is not None:
+        latest_inflow = monthly_inflow_usd / 1e9  # billions USD
+    elif monthly_inflow_btc is not None:
+        # Show BTC flows scaled to thousands to keep numbers manageable
+        latest_inflow = monthly_inflow_btc / 1e3  # thousands BTC
+    else:
+        latest_inflow = None
     # Pi cycle cross results
     pi_cross_occured, pi_approaching, ma_df = pi_cross
 
@@ -464,7 +473,18 @@ def main():
         # Represent status: positive implies cross occurred, negative implies not yet
         pi_status_val = diff / ma_df.iloc[-1]['2x350sma'] if ma_df.iloc[-1]['2x350sma'] != 0 else None
     display_metric_card(cols[2], "Pi Cycle Status", pi_status_val, threshold=0.0, unit="", higher_is_warning=True)
-    display_metric_card(cols[3], "Exchange inflow (30d, $B)", latest_inflow, threshold=10.0, unit="B", higher_is_warning=True)
+    # Determine threshold and unit based on whether we have USD or BTC flows
+    if monthly_inflow_usd is not None:
+        inflow_threshold = 10.0  # $10B
+        inflow_unit = "B"
+    elif monthly_inflow_btc is not None:
+        # Approximate $10B / $30k ≈ 333k BTC → 333 (thousand BTC)
+        inflow_threshold = 330.0  # thousands BTC
+        inflow_unit = "k BTC"
+    else:
+        inflow_threshold = None
+        inflow_unit = ""
+    display_metric_card(cols[3], "Exchange inflow (30d)", latest_inflow, threshold=inflow_threshold, unit=inflow_unit, higher_is_warning=True)
     display_metric_card(cols[4], "Reserve Risk", latest_reserve, threshold=0.015, unit="", higher_is_warning=True)
 
     # Additional metrics row

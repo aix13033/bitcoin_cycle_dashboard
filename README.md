@@ -15,7 +15,9 @@ levels based on broader market conditions.
 - **On‑chain metrics** sourced from the free **BGeometrics Bitcoin Data
   API**: MVRV Z‑Score, Long Term Holder SOPR and Reserve Risk. The
   API requires no key, though it is rate‑limited. Exchange inflow
-  volumes are proxied using ETF flows from the same API.
+  volumes are proxied using ETF flows from the same API. When price
+  data is unavailable, ETF flows are displayed in BTC (thousands)
+  rather than converted to USD.
 - **Technical indicator**: Pi Cycle Top (111‑day vs 2×350‑day SMAs).
 - **Exchange data**: Bitcoin dominance (Coingecko) and funding
   rates (Binance perpetual futures).
